@@ -1,0 +1,12 @@
+# Snowflake CLI connection configuration
+# Copy this file to ~/.snowflake/config.toml and fill in your credentials.
+# Docs: https://docs.snowflake.com/en/developer-guide/snowflake-cli/connecting/specify-credentials
+
+[connections.default]
+account = "myorg-myaccount"
+user = "MY_USER"
+password = ""                       # or use authenticator = "externalbrowser"
+role = "MY_ROLE"
+warehouse = "MY_WAREHOUSE"
+database = "MY_DATABASE"
+schema = "RISK_SCORING_MODEL"
