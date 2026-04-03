@@ -10,6 +10,7 @@ engineered_features.csv
 
 comparison_output.log
 comparison_results.json
+benchmark_results.csv
 diff_output.txt
 
 .DS_Store

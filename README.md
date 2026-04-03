@@ -239,6 +239,8 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 
 ## Comparison Results
 
+![Benchmark Chart](benchmark_chart.png)
+
 ### Small (~3,000 rows)
 
 | Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
