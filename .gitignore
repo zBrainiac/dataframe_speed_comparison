@@ -13,6 +13,7 @@ comparison_results.json
 benchmark_results.csv
 diff_output.txt
 
+output/
 .DS_Store
 *.egg-info/
 dist/
@@ -20,3 +21,12 @@ build/
 
 *.toml
 !config.toml.example
+
+# Spark / Derby temp files
+metastore_db/
+derby.log
+spark-warehouse/
+*.log
+
+# Chart copies (keep benchmark_chart.png for README)
+benchmark_chart copy.png

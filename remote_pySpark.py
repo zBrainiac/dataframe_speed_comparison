@@ -1,38 +1,40 @@
 """
-Fraud Risk Scoring — V0: Classic PySpark (local Spark, local CSV files)
+Fraud Risk Scoring — remote_pySpark: Classic PySpark (local Spark, data from Snowflake stage)
 
-Baseline version: reads data from local CSV files in ./data/
+Replaces df.toPandas().to_csv() with Spark's native CSV writer
+to avoid collectToPython OOM at write-back for large datasets (500K+ rows).
 """
 
-VERSION = "V0"
-VERSION_LABEL = "Classic PySpark (local CSV)"
+VERSION = "remote_pySpark"
 
 import os
-os.environ["PYSPARK_SUBMIT_ARGS"] = "--driver-memory 12g --conf spark.driver.extraJavaOptions=--add-opens=java.base/javax.security.auth=ALL-UNNAMED pyspark-shell"
 os.environ["PYSPARK_SUBMIT_ARGS"] = "--driver-memory 12g --conf spark.driver.extraJavaOptions=--add-opens=java.base/javax.security.auth=ALL-UNNAMED pyspark-shell"
 import sys
 import platform
 import time
 from datetime import datetime, timezone
 
+import snowflake.connector
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, IntegerType, BooleanType,
 )
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+SF_DB = os.getenv("SF_DATABASE", "MY_DATABASE")
+SF_SCHEMA = os.getenv("SF_SCHEMA", "RISK_SCORING_MODEL")
+SF_STAGE = os.getenv("SF_STAGE", "DATA")
+FQN = f"@{SF_DB}.{SF_SCHEMA}.{SF_STAGE}"
 
 DATA_MODE = {
-    "small":  os.path.join(DATA_DIR, "synthetic_fraud_data_small.csv"),
-    "500k":   os.path.join(DATA_DIR, "synthetic_fraud_data_500k.csv"),
-    "1mio":   os.path.join(DATA_DIR, "synthetic_fraud_data_1mio.csv"),
-    "medium": os.path.join(DATA_DIR, "synthetic_fraud_data_medium.csv"),
-    "big":    os.path.join(DATA_DIR, "synthetic_fraud_data.csv"),
+    "small":  f"{FQN}/synthetic_fraud_data_small.csv",
+    "500k":   f"{FQN}/synthetic_fraud_data_500k.csv",
+    "1mio":   f"{FQN}/synthetic_fraud_data_1mio.csv",
+    "medium": f"{FQN}/synthetic_fraud_data_medium.csv",
+    "big":    f"{FQN}/synthetic_fraud_data.csv",
 }
 DATA_SIZE = os.getenv("DATA_SIZE", "small").lower()
 DATA_IN = DATA_MODE[DATA_SIZE]
-DATA_OUT = os.getenv("SF_TABLE_OUT", "MY_DATABASE.RISK_SCORING_MODEL.ENGINEERED_FEATURES")
+DATA_OUT = f"{SF_DB}.{SF_SCHEMA}.ENGINEERED_FEATURES"
 
 STAGE_SCHEMA = StructType([
     StructField("transaction_id", StringType()),
@@ -82,23 +84,58 @@ def _parse_float(v):
 
 # ─── LINE 1 of 2 that differs ───────────────────────────────────────
 def get_spark():
-    return (SparkSession.builder
-            .appName("FraudRiskScoring")
-            .master("local[2]")
-            .config("spark.driver.memory", "16g")
-            .config("spark.driver.extraJavaOptions", "--add-opens=java.base/javax.security.auth=ALL-UNNAMED")
-            .getOrCreate())
+    return SparkSession.builder.appName("FraudRiskScoring").master("local[2]").config("spark.driver.memory", "16g").getOrCreate()
 
 
+# ─── LINE 2 of 2 that differs ───────────────────────────────────────
 def load_data(spark):
-    print(f"    [load_data] Reading local CSV: {DATA_IN}")
-    df = spark.read.csv(DATA_IN, header=True, schema=STAGE_SCHEMA)
-    print(f"    [load_data] CSV loaded successfully")
-    return df
+    conn_name = os.getenv("SNOWFLAKE_CONNECTION_NAME", "default")
+    print(f"    [load_data] Connecting to Snowflake (connection={conn_name}) ...")
+    conn = snowflake.connector.connect(connection_name=conn_name)
+    cur = conn.cursor()
+    try:
+        print(f"    [load_data] USE DATABASE {SF_DB}")
+        cur.execute(f"USE DATABASE {SF_DB}")
+        print(f"    [load_data] USE SCHEMA {SF_SCHEMA}")
+        cur.execute(f"USE SCHEMA {SF_SCHEMA}")
+        print(f"    [load_data] Creating temporary file format CSV_FF ...")
+        cur.execute(
+            "CREATE TEMPORARY FILE FORMAT IF NOT EXISTS CSV_FF "
+            "TYPE='CSV' SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='\"'"
+        )
+        sql = (
+            "SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,"
+            "$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,"
+            "$21,$22,$23,$24 "
+            f"FROM {DATA_IN} (FILE_FORMAT => 'CSV_FF')"
+        )
+        print(f"    [load_data] Executing stage query: {DATA_IN}")
+        cur.execute(sql)
+        print(f"    [load_data] Fetching all rows into memory ...")
+        rows = cur.fetchall()
+        print(f"    [load_data] Fetched {len(rows)} rows from Snowflake stage")
+    finally:
+        cur.close()
+        conn.close()
+        print(f"    [load_data] Snowflake connection closed")
+
+    print(f"    [load_data] Parsing & type-casting {len(rows)} rows ...")
+    typed_rows = []
+    for r in rows:
+        typed_rows.append((
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+            _parse_float(r[7]), r[8], r[9], r[10], r[11], r[12],
+            _parse_bool(r[13]), r[14], r[15], r[16], r[17],
+            _parse_int(r[18]), _parse_bool(r[19]),
+            _parse_int(r[20]), _parse_bool(r[21]),
+            r[22], _parse_bool(r[23]),
+        ))
+    print(f"    [load_data] Creating DataFrame ({len(STAGE_SCHEMA.fields)} fields) ...")
+    return spark.createDataFrame(typed_rows, schema=STAGE_SCHEMA)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Everything below is IDENTICAL in run_v1.py and run_v2.py
+#  Everything below is IDENTICAL in remote_pySpark.py and remote_SnowparkConnect.py
 # ═══════════════════════════════════════════════════════════════════════
 
 def engineer_features(df):
@@ -137,7 +174,7 @@ def run_pipeline():
 
     print("=" * 60)
     print("  FRAUD RISK SCORING PIPELINE")
-    print(f"  Version: {VERSION} — {VERSION_LABEL}")
+    print(f"  Version: {VERSION}")
     print("=" * 60)
     print(f"  Started at  : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Data size   : {DATA_SIZE}")
@@ -149,7 +186,7 @@ def run_pipeline():
     print(f"  Connection  : {os.getenv('SNOWFLAKE_CONNECTION_NAME', '(default)')}")
     print("=" * 60)
 
-    print(f"\n[1/6] Initializing {VERSION_LABEL} session ...")
+    print(f"\n[1/6] Initializing {VERSION} session ...")
     t0 = time.monotonic()
     spark = get_spark()
     spark.sparkContext.setLogLevel("WARN")
@@ -233,12 +270,14 @@ def run_pipeline():
 
     print(f"\n[6/6] Writing engineered features ...")
     t0 = time.monotonic()
-    out_path = os.path.join(SCRIPT_DIR, "engineered_features")
-    df.coalesce(1).write.mode("overwrite").option("header", True).csv(out_path)
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "engineered_features_v1")
+    df.repartition(4).write.mode("overwrite").option("header", "true").csv(out_path)
     telemetry["write_back"] = time.monotonic() - t0
-    print(f"       Data Output    : {out_path}")
+    print(f"       Data Output    : {out_path}/")
     print(f"       Mode           : overwrite")
-    print(f"       Format         : CSV (local, Spark writer)")
+    print(f"       Format         : CSV (Spark native writer, no collectToPython)")
     print(f"       Done in {telemetry['write_back']:.2f}s")
 
     print("\n       Stopping Spark session ...")
@@ -249,7 +288,7 @@ def run_pipeline():
     end_ts = datetime.now(timezone.utc)
 
     print("\n" + "=" * 60)
-    print(f"  TELEMETRY: {VERSION} {VERSION_LABEL}")
+    print(f"  TELEMETRY: {VERSION}")
     print("=" * 60)
     print(f"  Started       : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Finished      : {end_ts:%Y-%m-%d %H:%M:%S %Z}")

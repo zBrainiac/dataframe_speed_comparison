@@ -1,41 +1,65 @@
 """
-Fraud Risk Scoring — V3: Snowpark Connect (optimized)
+Fraud Risk Scoring — local_pySpark: Classic PySpark (local Spark, local CSV files)
 
-Compare with run_v1.py — only 2 secions differ:
-  1. SparkSession creation  (local[*] vs snowpark_connect)
-  2. Data loading           (stage via connector vs spark.read.table)
+Baseline version: reads data from local CSV files in ./data/
 """
 
-VERSION = "V3"
-VERSION_LABEL = "Snowpark Connect (Snowflake compute)"
+VERSION = "local_pySpark"
 
 import os
+os.environ["PYSPARK_SUBMIT_ARGS"] = "--driver-memory 12g --conf spark.driver.extraJavaOptions=--add-opens=java.base/javax.security.auth=ALL-UNNAMED pyspark-shell"
 import sys
 import platform
 import time
 from datetime import datetime, timezone
 
-
-
-from snowflake import snowpark_connect
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, IntegerType, BooleanType,
 )
 
-SF_DB = os.getenv("SF_DATABASE", "MY_DATABASE")
-SF_SCHEMA = os.getenv("SF_SCHEMA", "RISK_SCORING_MODEL")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 DATA_MODE = {
-    "small":  f"{SF_DB}.{SF_SCHEMA}.RAW_TRANSACTIONS_SMALL",
-    "500k":   f"{SF_DB}.{SF_SCHEMA}.RAW_TRANSACTIONS_500K",
-    "1mio":   f"{SF_DB}.{SF_SCHEMA}.RAW_TRANSACTIONS_1MIO",
-    "medium": f"{SF_DB}.{SF_SCHEMA}.RAW_TRANSACTIONS_MEDIUM",
-    "big":    f"{SF_DB}.{SF_SCHEMA}.RAW_TRANSACTIONS",
+    "small":  os.path.join(DATA_DIR, "synthetic_fraud_data_small.csv"),
+    "500k":   os.path.join(DATA_DIR, "synthetic_fraud_data_500k.csv"),
+    "1mio":   os.path.join(DATA_DIR, "synthetic_fraud_data_1mio.csv"),
+    "medium": os.path.join(DATA_DIR, "synthetic_fraud_data_medium.csv"),
+    "big":    os.path.join(DATA_DIR, "synthetic_fraud_data.csv"),
 }
 DATA_SIZE = os.getenv("DATA_SIZE", "small").lower()
 DATA_IN = DATA_MODE[DATA_SIZE]
-DATA_OUT = f"{SF_DB}.{SF_SCHEMA}.ENGINEERED_FEATURES"
+DATA_OUT = os.getenv("SF_TABLE_OUT", "MY_DATABASE.RISK_SCORING_MODEL.ENGINEERED_FEATURES")
+
+STAGE_SCHEMA = StructType([
+    StructField("transaction_id", StringType()),
+    StructField("customer_id", StringType()),
+    StructField("card_number", StringType()),
+    StructField("timestamp", StringType()),
+    StructField("merchant_category", StringType()),
+    StructField("merchant_type", StringType()),
+    StructField("merchant", StringType()),
+    StructField("amount", DoubleType()),
+    StructField("currency", StringType()),
+    StructField("country", StringType()),
+    StructField("city", StringType()),
+    StructField("city_size", StringType()),
+    StructField("card_type", StringType()),
+    StructField("card_present", BooleanType()),
+    StructField("device", StringType()),
+    StructField("channel", StringType()),
+    StructField("device_fingerprint", StringType()),
+    StructField("ip_address", StringType()),
+    StructField("distance_from_home", IntegerType()),
+    StructField("high_risk_merchant", BooleanType()),
+    StructField("transaction_hour", IntegerType()),
+    StructField("weekend_transaction", BooleanType()),
+    StructField("velocity_last_hour", StringType()),
+    StructField("is_fraud", BooleanType()),
+])
 
 DROP_COLS = [
     "transaction_id", "customer_id", "card_number",
@@ -44,22 +68,37 @@ DROP_COLS = [
 LABEL_COL = "is_fraud"
 
 
+def _parse_bool(v):
+    return v.strip().lower() == "true" if v else None
+
+def _parse_int(v):
+    try: return int(v) if v else None
+    except ValueError: return None
+
+def _parse_float(v):
+    try: return float(v) if v else None
+    except ValueError: return None
+
+
 # ─── LINE 1 of 2 that differs ───────────────────────────────────────
 def get_spark():
-    return snowpark_connect.init_spark_session()
+    return (SparkSession.builder
+            .appName("FraudRiskScoring")
+            .master("local[2]")
+            .config("spark.driver.memory", "16g")
+            .config("spark.driver.extraJavaOptions", "--add-opens=java.base/javax.security.auth=ALL-UNNAMED")
+            .getOrCreate())
 
 
-# ─── LINE 2 of 2 that differs ───────────────────────────────────────
 def load_data(spark):
-    print(f"    [load_data] Reading Snowflake table: {DATA_IN}")
-    df = spark.read.table(DATA_IN)
-    df = df.toDF(*[c.lower() for c in df.columns])
-    print(f"    [load_data] Creating DataFrame")
+    print(f"    [load_data] Reading local CSV: {DATA_IN}")
+    df = spark.read.csv(DATA_IN, header=True, schema=STAGE_SCHEMA)
+    print(f"    [load_data] CSV loaded successfully")
     return df
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Everything below is IDENTICAL in run_v1.py and run_v2.py
+#  Everything below is IDENTICAL in remote_pySpark.py and remote_SnowparkConnect.py
 # ═══════════════════════════════════════════════════════════════════════
 
 def engineer_features(df):
@@ -98,7 +137,7 @@ def run_pipeline():
 
     print("=" * 60)
     print("  FRAUD RISK SCORING PIPELINE")
-    print(f"  Version: {VERSION} — {VERSION_LABEL}")
+    print(f"  Version: {VERSION}")
     print("=" * 60)
     print(f"  Started at  : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Data size   : {DATA_SIZE}")
@@ -110,19 +149,24 @@ def run_pipeline():
     print(f"  Connection  : {os.getenv('SNOWFLAKE_CONNECTION_NAME', '(default)')}")
     print("=" * 60)
 
-    print(f"\n[1/6] Initializing {VERSION_LABEL} session ...")
+    print(f"\n[1/6] Initializing {VERSION} session ...")
     t0 = time.monotonic()
     spark = get_spark()
+    spark.sparkContext.setLogLevel("WARN")
     telemetry["session_init"] = time.monotonic() - t0
     print(f"       Spark version  : {spark.version}")
-    print(f"       Session type   : {VERSION_LABEL}")
+    print(f"       Master         : {spark.sparkContext.master}")
+    print(f"       App name       : {spark.sparkContext.appName}")
+    print(f"       Parallelism    : {spark.sparkContext.defaultParallelism}")
     print(f"       Done in {telemetry['session_init']:.2f}s")
 
     print(f"\n[2/6] Loading data from Snowflake ...")
     print(f"       Source: {DATA_IN}")
     t0 = time.monotonic()
     raw_df = load_data(spark)
+    total_rows = raw_df.count()
     telemetry["data_load"] = time.monotonic() - t0
+    print(f"       Rows loaded    : {total_rows:,}")
     print(f"       Columns        : {len(raw_df.columns)}")
     print(f"       Column names   : {raw_df.columns}")
     print(f"       Schema:")
@@ -133,10 +177,7 @@ def run_pipeline():
     print(f"\n[3/6] Engineering features ...")
     t0 = time.monotonic()
     df = engineer_features(raw_df)
-    df = df.cache()
-    total_rows = df.count()
     telemetry["feature_eng"] = time.monotonic() - t0
-    print(f"       Rows           : {total_rows:,}")
     print(f"       Columns before : {len(raw_df.columns)}")
     print(f"       Columns after  : {len(df.columns)}")
     print(f"       Final columns  : {df.columns}")
@@ -145,22 +186,18 @@ def run_pipeline():
     print(f"\n[4/6] Splitting data (75/25, seed=42) ...")
     t0 = time.monotonic()
     train_df, test_df = df.randomSplit([0.75, 0.25], seed=42)
+    train_rows = train_df.count()
+    test_rows = test_df.count()
     telemetry["split"] = time.monotonic() - t0
-    train_est = int(total_rows * 0.75)
-    test_est = total_rows - train_est
-    print(f"       Train rows     : ~{train_est:,} (75.0%)")
-    print(f"       Test rows      : ~{test_est:,} (25.0%)")
+    print(f"       Train rows     : {train_rows:,} ({train_rows/total_rows*100:.1f}%)")
+    print(f"       Test rows      : {test_rows:,} ({test_rows/total_rows*100:.1f}%)")
     print(f"       Done in {telemetry['split']:.2f}s")
 
     print(f"\n[5/6] Computing aggregation statistics ...")
     t0 = time.monotonic()
-    agg_cols = ["merchant_category", "country", "channel", "device", "amount",
-                LABEL_COL, "velocity_num_transactions", "velocity_total_amount",
-                "velocity_unique_merchants", "velocity_max_single_amount"]
-    agg_df = df.select(*agg_cols)
 
     print("\n--- Fraud Rate by Merchant Category ---")
-    agg_df.groupBy("merchant_category").agg(
+    df.groupBy("merchant_category").agg(
         F.count("*").alias("total_txns"),
         F.sum(LABEL_COL).alias("fraud_count"),
         F.round(F.avg(F.col(LABEL_COL).cast("double")) * 100, 2).alias("fraud_rate_pct"),
@@ -169,7 +206,7 @@ def run_pipeline():
     ).orderBy(F.desc("fraud_rate_pct")).show(20, truncate=False)
 
     print("--- Fraud Rate by Country ---")
-    agg_df.groupBy("country").agg(
+    df.groupBy("country").agg(
         F.count("*").alias("total_txns"),
         F.sum(LABEL_COL).alias("fraud_count"),
         F.round(F.avg(F.col(LABEL_COL).cast("double")) * 100, 2).alias("fraud_rate_pct"),
@@ -177,14 +214,14 @@ def run_pipeline():
     ).orderBy(F.desc("fraud_rate_pct")).show(20, truncate=False)
 
     print("--- Fraud Rate by Channel & Device ---")
-    agg_df.groupBy("channel", "device").agg(
+    df.groupBy("channel", "device").agg(
         F.count("*").alias("total_txns"),
         F.sum(LABEL_COL).alias("fraud_count"),
         F.round(F.avg(F.col(LABEL_COL).cast("double")) * 100, 2).alias("fraud_rate_pct"),
     ).orderBy(F.desc("fraud_rate_pct")).show(20, truncate=False)
 
     print("--- Velocity Stats by Fraud Flag ---")
-    agg_df.groupBy(LABEL_COL).agg(
+    df.groupBy(LABEL_COL).agg(
         F.round(F.avg("velocity_num_transactions"), 2).alias("avg_velocity_txns"),
         F.round(F.avg("velocity_total_amount"), 2).alias("avg_velocity_amount"),
         F.round(F.avg("velocity_unique_merchants"), 2).alias("avg_velocity_merchants"),
@@ -194,14 +231,14 @@ def run_pipeline():
     telemetry["aggregations"] = time.monotonic() - t0
     print(f"       Done in {telemetry['aggregations']:.2f}s")
 
-    print(f"\n[6/6] Writing engineered features to Snowflake ...")
+    print(f"\n[6/6] Writing engineered features ...")
     t0 = time.monotonic()
-    df.unpersist()
-    df.write.mode("overwrite").saveAsTable(DATA_OUT)
+    out_path = os.path.join(OUTPUT_DIR, "engineered_features")
+    df.coalesce(1).write.mode("overwrite").option("header", True).csv(out_path)
     telemetry["write_back"] = time.monotonic() - t0
-    print(f"       Data Output   : {DATA_OUT}")
+    print(f"       Data Output    : {out_path}")
     print(f"       Mode           : overwrite")
-    print(f"       Format         : Snowflake managed table (native catalog)")
+    print(f"       Format         : CSV (local, Spark writer)")
     print(f"       Done in {telemetry['write_back']:.2f}s")
 
     print("\n       Stopping Spark session ...")
@@ -212,7 +249,7 @@ def run_pipeline():
     end_ts = datetime.now(timezone.utc)
 
     print("\n" + "=" * 60)
-    print(f"  TELEMETRY: {VERSION} {VERSION_LABEL}")
+    print(f"  TELEMETRY: {VERSION}")
     print("=" * 60)
     print(f"  Started       : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Finished      : {end_ts:%Y-%m-%d %H:%M:%S %Z}")

@@ -12,14 +12,17 @@ Snowpark Connect with confidence.
 
 ## What
 
-A fraud-risk-scoring pipeline implemented in **four versions**:
+A fraud-risk-scoring pipeline implemented in **seven versions**:
 
-| Version | Engine | Data Source | Description |
-|---------|--------|-------------|-------------|
-| **V0** | Classic PySpark (`local[2]`) | Local CSV files in `./data/` | Baseline — no Snowflake dependency for data loading |
-| **V1** | Classic PySpark (`local[2]`) | Snowflake stage via `snowflake.connector` | Typical pattern: fetch from stage, build DataFrame locally |
-| **V2** | Snowpark Connect | Snowflake table via `spark.read.table()` | Drop-in replacement — compute runs on Snowflake |
-| **V3** | Snowpark Connect (optimized) | Snowflake table via `spark.read.table()` | V2 + performance tuning (cache, projection, deferred counts) |
+| Script | Engine | Data Source | Description |
+|--------|--------|-------------|-------------|
+| **local_duckdb** | DuckDB SQL | Local CSV files in `./data/` | No JVM — embedded SQL analytics engine |
+| **local_polars** | Polars DataFrame | Local CSV files in `./data/` | No JVM — Rust-based columnar engine |
+| **local_pandas** | Pure Pandas + NumPy | Local CSV files in `./data/` | No JVM — pure Python baseline |
+| **local_pySpark** | Classic PySpark (`local[2]`) | Local CSV files in `./data/` | Baseline — no Snowflake dependency for data loading |
+| **remote_pySpark** | Classic PySpark (`local[2]`) | Snowflake stage via `snowflake.connector` | Typical pattern: fetch from stage, build DataFrame locally |
+| **remote_SnowparkConnect** | Snowpark Connect | Snowflake table via `spark.read.table()` | Drop-in replacement — compute runs on Snowflake |
+| **remote_SnowparkConnect_Optimized** | Snowpark Connect (optimized) | Snowflake table via `spark.read.table()` | remote_SnowparkConnect + performance tuning (cache, projection, deferred counts) |
 
 ### System Architecture
 
@@ -39,7 +42,7 @@ A fraud-risk-scoring pipeline implemented in **four versions**:
                         +------|--------------|-------------|----------+
                                |              |             |
             +------------------+---------+    |             |
-            |          V1 path           |    |             |
+            |   remote_pySpark path      |    |             |
             |  snowflake.connector       |    |             |
             |  fetchall -> local memory  |    |             |
             +------------------+---------+    |             |
@@ -47,26 +50,28 @@ A fraud-risk-scoring pipeline implemented in **four versions**:
   +----------------------------+--------------+-------------+--------+
   |                    LOCAL MACHINE (Apple M1 Pro, 16 GB)           |
   |                                                                  |
-  |  run_v0.py    run_v1.py         run_v2.py       run_v3.py        |
   |  +-------+    +-----------+     +-----------+   +-------------+  |
-  |  | V0    |    | V1        |     | V2        |   | V3          |  |
-  |  | local |    | local     |     | Snowpark  |   | Snowpark    |  |
-  |  | CSV   |    | PySpark + |     | Connect   |   | Connect     |  |
-  |  | Spark |    | SF stage  |     |           |   | (optimized) |  |
+  |  | local |    | remote    |     | remote    |   | remote SC   |  |
+  |  | Py    |    | PySpark + |     | Snowpark  |   | Optimized   |  |
+  |  | Spark |    | SF stage  |     | Connect   |   |             |  |
+  |  |       |    |           |     |           |   |             |  |
   |  +---+---+    +-----+-----+     +-----+-----+   +------+------+  |
   |      |              |                |                 |         |
   |      v              v                v                 v         |
   |  ./data/*.csv   collectToPython   Snowflake          Snowflake   |
-  |  (read local)   (OOM >= 500K)     compute            compute     |
+  |  (read local)   (read local)      compute            compute     |
   |                                   (pushdown)         + cache     |
   |                                                      + project   |
   +------------------------------------------------------------------+
 
   Data flow:
-    V0:     local CSV  -->  local Spark  -->  local parquet
-    V1:     SF stage   -->  local memory -->  local Spark  -->  OOM at write-back
-    V2/V3:  SF table   -->  Snowflake compute (via Snowpark Connect)  -->  SF table
+    local_*:                    local CSV  -->  local engine  -->  local output
+    remote_pySpark:             SF stage   -->  local memory  -->  local Spark
+    remote_SnowparkConnect*:    SF table   -->  Snowflake compute (via Snowpark Connect)  -->  SF table
 ```
+## Result
+
+![Benchmark Chart](benchmark_chart.png)
 
 ### Pipeline Steps (identical across all versions)
 
@@ -77,7 +82,7 @@ A fraud-risk-scoring pipeline implemented in **four versions**:
 5. **Aggregation statistics** — fraud rate by category, country, channel/device, velocity
 6. **Write-back** — save engineered features
 
-### V3 Optimizations
+### remote_SnowparkConnect_Optimized — Optimizations
 
 1. `.cache()` after feature engineering to avoid recomputation
 2. Deferred `.count()` — piggybacks on cache materialization
@@ -91,17 +96,17 @@ Only **2 sections of code** differ between all versions:
 
 ```python
 # 1. Session creation
-# V0/V1:  SparkSession.builder.master("local[2]").getOrCreate()
-# V2/V3:  snowpark_connect.init_spark_session()
+# local_*:                   SparkSession.builder.master("local[2]").getOrCreate()
+# remote_SnowparkConnect*:   snowpark_connect.init_spark_session()
 
 # 2. Data loading
-# V0:     spark.read.csv("local_file.csv")
-# V1:     snowflake.connector -> fetchall -> createDataFrame
-# V2/V3:  spark.read.table("TABLE_NAME")
+# local_*:                   spark.read.csv("local_file.csv")
+# remote_pySpark:            snowflake.connector -> fetchall -> createDataFrame
+# remote_SnowparkConnect*:   spark.read.table("TABLE_NAME")
 ```
 
 The entire pipeline logic — feature engineering, splitting, aggregations, write-back —
-remains **100% identical** across all four versions.
+remains **100% identical** across all seven versions.
 
 ## How
 
@@ -111,13 +116,14 @@ remains **100% identical** across all four versions.
 
 - Python 3.12+
 - PySpark 3.5+
-- `snowpark-connect[jdk]` (for V2/V3)
-- A Snowflake account with a named connection configured (for V1/V2/V3)
+- `snowpark-connect[jdk]` (for remote_SnowparkConnect*)
+- A Snowflake account with a named connection configured (for remote_*)
 - JDK 17+ (handled automatically via `--add-opens` flags)
 
 **Test environment (not required — listed for reproducibility):**
 
 - Apple M1 Pro, 16 GB RAM
+- Snowflake XS Warehouse
 
 ### Environment Variables
 
@@ -137,14 +143,20 @@ All Snowflake-specific references are configurable via environment variables:
 pyspark/
 ├── README.md               # This file
 ├── config.toml.example     # Sample Snowflake CLI connection config
-├── run_v0.py               # V0: Classic PySpark, local CSV
-├── run_v1.py               # V1: Classic PySpark, Snowflake stage
-├── run_v2.py               # V2: Snowpark Connect
-├── run_v3.py               # V3: Snowpark Connect (optimized)
+├── local_duckdb.py                      # DuckDB SQL, local CSV
+├── local_polars.py                      # Polars DataFrame, local CSV
+├── local_pandas.py                      # Pure Pandas, local CSV
+├── local_pySpark.py                     # Classic PySpark, local CSV
+├── remote_pySpark.py                    # Classic PySpark, Snowflake stage
+├── remote_SnowparkConnect.py            # Snowpark Connect
+├── remote_SnowparkConnect_Optimized.py  # Snowpark Connect (optimized)
 ├── run_comparison.py        # Orchestrator: runs all versions, prints comparison
 ├── setup.sql               # DDL to create Snowflake tables from staged CSVs
-├── comparison_results.json  # Latest comparison results (JSON)
-├── comparison_output.log    # Full comparison output log
+├── output/
+│   ├── comparison_results.json          # Latest comparison results (JSON)
+│   ├── comparison_output.log            # Full comparison output log
+│   ├── benchmark_chart_<timestamp>.png  # Benchmark chart
+│   └── engineered_features_*.csv        # Pipeline output files
 └── data/
     ├── synthetic_fraud_data_small.csv    # ~3K rows
     ├── synthetic_fraud_data_500k.csv     # ~500K rows
@@ -184,12 +196,12 @@ chmod 0600 ~/.snowflake/config.toml
 
 See `config.toml.example` for the expected format.
 
-The config file defines **named connections** (e.g. `default`). When running V1/V2/V3,
+The config file defines **named connections** (e.g. `default`). When running remote_* scripts,
 pass the connection name via the `SNOWFLAKE_CONNECTION_NAME` environment variable so the scripts
 know which Snowflake account to target:
 
 ```bash
-SNOWFLAKE_CONNECTION_NAME=default python run_v2.py --500k
+SNOWFLAKE_CONNECTION_NAME=default python remote_SnowparkConnect.py --500k
 ```
 
 ### Setup (Snowflake objects)
@@ -201,18 +213,22 @@ snow sql -f setup.sql -c default
 ### Running a Single Version
 
 ```bash
-# V0 — local CSV
-python run_v0.py                    # defaults to "small"
-python run_v0.py --500k
+# local variants — no JVM needed
+DATA_SIZE=500k .venv/bin/python local_duckdb.py
+DATA_SIZE=500k .venv/bin/python local_polars.py
+DATA_SIZE=500k .venv/bin/python local_pandas.py
 
-# V1 — Snowflake stage
-SNOWFLAKE_CONNECTION_NAME=default python run_v1.py --500k
+# local PySpark
+DATA_SIZE=500k .venv/bin/python local_pySpark.py
 
-# V2 — Snowpark Connect
-SNOWFLAKE_CONNECTION_NAME=default python run_v2.py --500k
+# remote — Snowflake stage
+SNOWFLAKE_CONNECTION_NAME=NEWS_CREW_SVC SF_DATABASE=MD_TEST DATA_SIZE=500k .venv/bin/python remote_pySpark.py
 
-# V3 — Snowpark Connect (optimized)
-SNOWFLAKE_CONNECTION_NAME=default python run_v3.py --500k
+# remote — Snowpark Connect
+SNOWFLAKE_CONNECTION_NAME=NEWS_CREW_SVC SF_DATABASE=MD_TEST DATA_SIZE=500k .venv/bin/python remote_SnowparkConnect.py
+
+# remote — Snowpark Connect (optimized)
+SNOWFLAKE_CONNECTION_NAME=NEWS_CREW_SVC SF_DATABASE=MD_TEST DATA_SIZE=500k .venv/bin/python remote_SnowparkConnect_Optimized.py
 ```
 
 ### Running the Full Comparison
@@ -235,7 +251,7 @@ Available data-size flags:
 .venv/bin/python run_comparison.py --big        # 7.5M rows
 ```
 
-Results are written to `comparison_results.json` and `comparison_output.log`.
+Results are written to `output/comparison_results.json` and `output/comparison_output.log`.
 
 ## Comparison Results
 
@@ -243,7 +259,7 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 
 ### Small (~3,000 rows)
 
-| Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
+| Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
 |------|---------------:|---------------:|---------------:|---------------:|
 | session_init | 11.66s | 28.85s | 12.84s | 12.07s |
 | data_load | 5.29s | 13.84s | 0.50s | 0.14s |
@@ -253,11 +269,11 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 | write_back | 1.19s | 0.38s | 1.44s | 2.51s |
 | **TOTAL** | **37.44s** | **53.05s** | **23.51s** | **20.64s** |
 
-> V3 is **2.6x faster** than V1 and **1.1x faster** than V2.
+> remote_SnowparkConnect_Optimized is **2.6x faster** than remote_pySpark and **1.1x faster** than remote_SnowparkConnect.
 
 ### 500K rows
 
-| Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
+| Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
 |------|---------------:|---------------:|---------------:|---------------:|
 | session_init | 7.27s | 7.10s | 10.99s | 10.21s |
 | data_load | 2.03s | 21.80s | 0.36s | 0.10s |
@@ -267,12 +283,12 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 | write_back | 8.79s | crashed | 4.48s | 3.98s |
 | **TOTAL** | **32.44s** | **crashed** | **31.72s** | **22.50s** |
 
-> V3 is **1.4x faster** than V2 and V0 — saving ~10 seconds.
-> V1 completes steps 1–5 (53.64s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
+> remote_SnowparkConnect_Optimized is **1.4x faster** than remote_SnowparkConnect and local_pySpark — saving ~10 seconds.
+> remote_pySpark completes steps 1–5 (53.64s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
 
 ### 1M rows
 
-| Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
+| Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
 |------|---------------:|---------------:|---------------:|---------------:|
 | session_init | 7.17s | 7.05s | 10.32s | 8.08s |
 | data_load | 2.58s | 37.10s | 0.44s | 0.15s |
@@ -282,12 +298,12 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 | write_back | 16.62s | crashed | 8.72s | 2.56s |
 | **TOTAL** | **58.88s** | **crashed** | **35.75s** | **17.30s** |
 
-> V3 is **3.4x faster** than V0 — saving 41.6 seconds.
-> V1 completes steps 1–5 (76.08s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
+> remote_SnowparkConnect_Optimized is **3.4x faster** than local_pySpark — saving 41.6 seconds.
+> remote_pySpark completes steps 1–5 (76.08s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
 
 ### 2.5M rows
 
-| Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
+| Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
 |------|---------------:|---------------:|---------------:|---------------:|
 | session_init | 7.27s | 8.06s | 10.73s | 8.77s |
 | data_load | 3.31s | 80.91s | 0.94s | 0.11s |
@@ -297,12 +313,12 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 | write_back | 44.62s | crashed | 27.46s | 3.32s |
 | **TOTAL** | **123.15s** | **crashed** | **60.73s** | **21.47s** |
 
-> V3 is **5.7x faster** than V0 and **2.8x faster** than V2 — saving over 100 seconds.
-> V1 completes steps 1–5 (198.93s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
+> remote_SnowparkConnect_Optimized is **5.7x faster** than local_pySpark and **2.8x faster** than remote_SnowparkConnect — saving over 100 seconds.
+> remote_pySpark completes steps 1–5 (198.93s) but crashes at write-back (`collectToPython` OOM via Py4J/Netty).
 
 ### 7.5M rows
 
-| Step | V0 (Classic PySpark) | V1 (Classic PySpark) | V2 (Snowpark Connect) | V3 (Snowpark Connect, optimized) |
+| Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
 |------|---------------:|---------------:|---------------:|---------------:|
 | session_init | 7.84s | 7.61s | 10.74s | 10.65s |
 | data_load | 6.17s | 334.92s | 0.89s | 0.17s |
@@ -312,12 +328,12 @@ Results are written to `comparison_results.json` and `comparison_output.log`.
 | write_back | 119.87s | crashed | 64.29s | 4.46s |
 | **TOTAL** | **329.70s** | **crashed** | **108.44s** | **28.98s** |
 
-> V3 is **11.4x faster** than V0 and **3.7x faster** than V2 — saving over 300 seconds.
-> V1 completes steps 1–5 (846.24s) but crashes at write-back (`collectToPython` OOM / Netty connection reset).
+> remote_SnowparkConnect_Optimized is **11.4x faster** than local_pySpark and **3.7x faster** than remote_SnowparkConnect — saving over 300 seconds.
+> remote_pySpark completes steps 1–5 (846.24s) but crashes at write-back (`collectToPython` OOM / Netty connection reset).
 
 ## Limitations and Notes
 
-- **V1 OOM on large datasets:** V1 does not complete write-back for 500K+ rows due to `collectToPython` out-of-memory errors in the Py4J/Netty layer. Steps 1–5 still complete and timings are reported where available.
+- **remote_pySpark OOM on large datasets:** remote_pySpark does not complete write-back for 500K+ rows due to `collectToPython` out-of-memory errors in the Py4J/Netty layer. Steps 1–5 still complete and timings are reported where available.
 - **Single-machine benchmarks:** All results were collected on a single Apple M1 Pro (16 GB RAM). Production performance on larger Snowflake warehouses will differ.
 - **Single-run measurements:** Timings are from individual runs, not averaged across multiple iterations. Expect variance of a few seconds between runs.
 

@@ -1,13 +1,12 @@
 """
-Fraud Risk Scoring — V2: Snowpark Connect (Snowflake compute, data from table)
+Fraud Risk Scoring — remote_SnowparkConnect: Snowpark Connect (Snowflake compute, data from table)
 
-Compare with run_v1.py — only 2 secions differ:
+Compare with remote_pySpark.py — only 2 secions differ:
   1. SparkSession creation  (local[*] vs snowpark_connect)
   2. Data loading           (stage via connector vs spark.read.table)
 """
 
-VERSION = "V2"
-VERSION_LABEL = "Snowpark Connect (Snowflake compute)"
+VERSION = "remote_SnowparkConnect"
 
 import os
 os.environ["PYSPARK_SUBMIT_ARGS"] = "--driver-memory 12g --conf spark.driver.extraJavaOptions=--add-opens=java.base/javax.security.auth=ALL-UNNAMED pyspark-shell"
@@ -97,7 +96,7 @@ def load_data(spark):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Everything below is IDENTICAL in run_v1.py and run_v2.py
+#  Everything below is IDENTICAL in remote_pySpark.py and remote_SnowparkConnect.py
 # ═══════════════════════════════════════════════════════════════════════
 
 def engineer_features(df):
@@ -136,7 +135,7 @@ def run_pipeline():
 
     print("=" * 60)
     print("  FRAUD RISK SCORING PIPELINE")
-    print(f"  Version: {VERSION} — {VERSION_LABEL}")
+    print(f"  Version: {VERSION}")
     print("=" * 60)
     print(f"  Started at  : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Data size   : {DATA_SIZE}")
@@ -148,7 +147,7 @@ def run_pipeline():
     print(f"  Connection  : {os.getenv('SNOWFLAKE_CONNECTION_NAME', '(default)')}")
     print("=" * 60)
 
-    print(f"\n[1/6] Initializing {VERSION_LABEL} session ...")
+    print(f"\n[1/6] Initializing {VERSION} session ...")
     t0 = time.monotonic()
     spark = get_spark()
     telemetry["session_init"] = time.monotonic() - t0
@@ -231,10 +230,12 @@ def run_pipeline():
 
     print(f"\n[6/6] Writing engineered features ...")
     t0 = time.monotonic()
-    out_path = "engineered_features.csv"
-    df.toPandas().to_csv(out_path, index=False)
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "engineered_features_v2")
+    df.repartition(4).write.mode("overwrite").option("header", "true").csv(out_path)
     telemetry["write_back"] = time.monotonic() - t0
-    print(f"       Data Output    : {out_path}")
+    print(f"       Data Output    : {out_path}/")
     print(f"       Mode           : overwrite")
     print(f"       Format         : CSV (local)")
     print(f"       Done in {telemetry['write_back']:.2f}s")
@@ -247,7 +248,7 @@ def run_pipeline():
     end_ts = datetime.now(timezone.utc)
 
     print("\n" + "=" * 60)
-    print(f"  TELEMETRY: {VERSION} {VERSION_LABEL}")
+    print(f"  TELEMETRY: {VERSION}")
     print("=" * 60)
     print(f"  Started       : {start_ts:%Y-%m-%d %H:%M:%S %Z}")
     print(f"  Finished      : {end_ts:%Y-%m-%d %H:%M:%S %Z}")
