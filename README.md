@@ -69,7 +69,7 @@ A fraud-risk-scoring pipeline implemented in **seven versions**:
     remote_pySpark:             SF stage   -->  local memory  -->  local Spark
     remote_SnowparkConnect*:    SF table   -->  Snowflake compute (via Snowpark Connect)  -->  SF table
 ```
-## Result
+## Comparison Results
 
 ![Benchmark Chart](benchmark_chart.png)
 
@@ -253,10 +253,6 @@ Available data-size flags:
 
 Results are written to `output/comparison_results.json` and `output/comparison_output.log`.
 
-## Comparison Results
-
-![Benchmark Chart](benchmark_chart.png)
-
 ### Small (~3,000 rows)
 
 | Step | local_pySpark | remote_pySpark | remote_SnowparkConnect | remote_SnowparkConnect_Optimized |
@@ -332,8 +328,6 @@ Results are written to `output/comparison_results.json` and `output/comparison_o
 > remote_pySpark completes steps 1–5 (846.24s) but crashes at write-back (`collectToPython` OOM / Netty connection reset).
 
 ## Limitations and Notes
-
-- **remote_pySpark OOM on large datasets:** remote_pySpark does not complete write-back for 500K+ rows due to `collectToPython` out-of-memory errors in the Py4J/Netty layer. Steps 1–5 still complete and timings are reported where available.
 - **Single-machine benchmarks:** All results were collected on a single Apple M1 Pro (16 GB RAM). Production performance on larger Snowflake warehouses will differ.
-- **Single-run measurements:** Timings are from individual runs, not averaged across multiple iterations. Expect variance of a few seconds between runs.
+
 
